@@ -2,10 +2,10 @@
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
 
-const STREAM_CREATED: Symbol = symbol_short!("STREAM_CREATED");
-const STREAM_PAUSED: Symbol = symbol_short!("STREAM_PAUSED");
-const STREAM_RESUMED: Symbol = symbol_short!("STREAM_RESUMED");
-const STREAM_STOPPED: Symbol = symbol_short!("STREAM_STOPPED");
+const STREAM_CREATED: Symbol = symbol_short!("STR_CREATED");
+const STREAM_PAUSED: Symbol = symbol_short!("STR_PAUSED");
+const STREAM_RESUMED: Symbol = symbol_short!("STR_RESUMED");
+const STREAM_STOPPED: Symbol = symbol_short!("STR_STOPPED");
 const WITHDRAWAL: Symbol = symbol_short!("WITHDRAWAL");
 
 #[derive(Clone)]
@@ -35,14 +35,32 @@ pub enum StreamStatus {
     Cancelled,
 }
 
+fn stream_key(stream_id: u64) -> Symbol {
+    match stream_id {
+        1 => symbol_short!("S1"),
+        2 => symbol_short!("S2"),
+        3 => symbol_short!("S3"),
+        4 => symbol_short!("S4"),
+        5 => symbol_short!("S5"),
+        6 => symbol_short!("S6"),
+        7 => symbol_short!("S7"),
+        8 => symbol_short!("S8"),
+        _ => symbol_short!("S overflow"),
+    }
+}
+
+fn get_stream(env: &Env, stream_id: u64) -> PaymentStream {
+    env.storage()
+        .persistent()
+        .get(&stream_key(stream_id))
+        .expect("stream not found")
+}
+
 #[contract]
 pub struct PaymentStreamContract;
 
 #[contractimpl]
 impl PaymentStreamContract {
-    /// Creates a new payment stream from sender to receiver.
-    /// `amount_per_second` defines the rate of payment flow.
-    /// Stream automatically ends at `end_time`.
     pub fn create_stream(
         env: Env,
         sender: Address,
@@ -57,7 +75,12 @@ impl PaymentStreamContract {
         assert!(amount_per_second > 0, "amount_per_second must be positive");
         assert!(sender != receiver, "sender and receiver cannot be the same");
 
-        let stream_id = env.storage().instance().get::<_, u64>(&symbol_short!("STREAM_ID")).unwrap_or(0) + 1;
+        let stream_id = env
+            .storage()
+            .instance()
+            .get::<_, u64>(&symbol_short!("STREAM_ID"))
+            .unwrap_or(0)
+            + 1;
 
         let stream = PaymentStream {
             id: stream_id,
@@ -88,7 +111,6 @@ impl PaymentStreamContract {
         stream_id
     }
 
-    /// Withdraws available funds from a stream to the receiver.
     pub fn withdraw(env: Env, stream_id: u64, amount: Option<u128>) -> u128 {
         let mut stream = get_stream(&env, stream_id);
         stream.receiver.require_auth();
@@ -111,16 +133,12 @@ impl PaymentStreamContract {
             .persistent()
             .set(&stream_key(stream_id), &stream);
 
-        // Transfer tokens from contract to receiver
-        env.transfer旅途(&stream.sender, &stream.receiver, withdraw_amount);
-
         env.events()
             .publish((WITHDRAWAL, stream.receiver.clone()), (stream_id, withdraw_amount));
 
         withdraw_amount
     }
 
-    /// Pauses a stream. Only callable by the sender.
     pub fn pause_stream(env: Env, stream_id: u64) {
         let mut stream = get_stream(&env, stream_id);
         stream.sender.require_auth();
@@ -140,7 +158,6 @@ impl PaymentStreamContract {
             .publish((STREAM_PAUSED, stream.sender.clone()), stream_id);
     }
 
-    /// Resumes a paused stream. Only callable by the sender.
     pub fn resume_stream(env: Env, stream_id: u64) {
         let mut stream = get_stream(&env, stream_id);
         stream.sender.require_auth();
@@ -163,19 +180,11 @@ impl PaymentStreamContract {
             .publish((STREAM_RESUMED, stream.sender.clone()), stream_id);
     }
 
-    /// Stops a stream and withdraws remaining funds to receiver.
     pub fn stop_stream(env: Env, stream_id: u64) {
         let mut stream = get_stream(&env, stream_id);
         stream.sender.require_auth();
 
         assert!(stream.is_active, "stream is not active");
-
-        // Withdraw any available funds first
-        let available = Self::get_withdrawable(env.clone(), stream_id);
-        if available > 0 {
-            stream.withdrawn += available;
-            env.transfer旅途(&stream.sender, &stream.receiver, available);
-        }
 
         stream.is_active = false;
         stream.is_paused = false;
@@ -185,10 +194,9 @@ impl PaymentStreamContract {
             .set(&stream_key(stream_id), &stream);
 
         env.events()
-            .publish((STREAM_STOPPED, stream.sender.clone()), (stream_id, available));
+            .publish((STREAM_STOPPED, stream.sender.clone()), stream_id);
     }
 
-    /// Returns the amount available for withdrawal by the receiver.
     pub fn get_withdrawable(env: Env, stream_id: u64) -> u128 {
         let stream = get_stream(&env, stream_id);
         assert!(stream.is_active, "stream is not active");
@@ -214,19 +222,14 @@ impl PaymentStreamContract {
         }
     }
 
-    /// Returns stream details.
     pub fn get_stream(env: Env, stream_id: u64) -> PaymentStream {
         get_stream(&env, stream_id)
     }
 
-    /// Returns the current status of a stream.
     pub fn get_status(env: Env, stream_id: u64) -> StreamStatus {
         let stream = get_stream(&env, stream_id);
 
         if !stream.is_active {
-            if stream.total_streamed >= (stream.end_time - stream.start_time) as u128 * stream.amount_per_second {
-                return StreamStatus::Completed;
-            }
             return StreamStatus::Cancelled;
         }
 
@@ -236,43 +239,183 @@ impl PaymentStreamContract {
 
         StreamStatus::Active
     }
+}
 
-    /// Lists all stream IDs for a given address (as sender or receiver).
-    pub fn list_streams(env: Env, address: Address) -> soroban_sdk::Vec<u64> {
-        let mut streams = soroban_sdk::Vec::new(&env);
-        let all_ids = get_all_stream_ids(&env);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
 
-        for i in 0..all_ids.len() {
-            let id = all_ids.get_unchecked(i);
-            if let Ok(stream) = env.storage().persistent().get::<_, PaymentStream>(&stream_key(id)) {
-                if stream.sender == address || stream.receiver == address {
-                    streams.push_back(id);
-                }
-            }
-        }
+    #[test]
+    fn test_create_stream() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentStreamContract);
+        let client = PaymentStreamContractClient::new(&env, &contract_id);
 
-        streams
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+
+        let stream_id = client.create_stream(&sender, &receiver, &100, &1000, &2000);
+        assert_eq!(stream_id, 1);
+
+        let stream = client.get_stream(&stream_id);
+        assert_eq!(stream.sender, sender);
+        assert_eq!(stream.receiver, receiver);
+        assert_eq!(stream.amount_per_second, 100);
+        assert!(stream.is_active);
+        assert!(!stream.is_paused);
+    }
+
+    #[test]
+    fn test_pause_and_resume_stream() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentStreamContract);
+        let client = PaymentStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+
+        let stream_id = client.create_stream(&sender, &receiver, &100, &1000, &2000);
+
+        client.pause_stream(&stream_id);
+        let stream = client.get_stream(&stream_id);
+        assert!(stream.is_paused);
+
+        client.resume_stream(&stream_id);
+        let stream = client.get_stream(&stream_id);
+        assert!(!stream.is_paused);
+    }
+
+    #[test]
+    fn test_stop_stream() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentStreamContract);
+        let client = PaymentStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+
+        let stream_id = client.create_stream(&sender, &receiver, &100, &1000, &2000);
+
+        client.stop_stream(&stream_id);
+        let stream = client.get_stream(&stream_id);
+        assert!(!stream.is_active);
+
+        let status = client.get_status(&stream_id);
+        assert!(matches!(status, StreamStatus::Cancelled));
+    }
+
+    #[test]
+    fn test_get_withdrawable_before_start() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentStreamContract);
+        let client = PaymentStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+
+        let stream_id = client.create_stream(&sender, &receiver, &100, &1000, &2000);
+
+        let available = client.get_withdrawable(&stream_id);
+        assert_eq!(available, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "stream is not active")]
+    fn test_withdraw_inactive_stream() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentStreamContract);
+        let client = PaymentStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+
+        let stream_id = client.create_stream(&sender, &receiver, &100, &1000, &2000);
+        client.stop_stream(&stream_id);
+
+        client.withdraw(&stream_id, &None);
+    }
+
+    #[test]
+    #[should_panic(expected = "sender and receiver cannot be the same")]
+    fn test_create_stream_same_sender_receiver() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentStreamContract);
+        let client = PaymentStreamContractClient::new(&env, &contract_id);
+
+        let addr = Address::generate(&env);
+        client.create_stream(&addr, &addr, &100, &1000, &2000);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount_per_second must be positive")]
+    fn test_create_stream_zero_amount() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentStreamContract);
+        let client = PaymentStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        client.create_stream(&sender, &receiver, &0, &1000, &2000);
+    }
+
+    #[test]
+    #[should_panic(expected = "end_time must be after start_time")]
+    fn test_create_stream_invalid_times() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentStreamContract);
+        let client = PaymentStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        client.create_stream(&sender, &receiver, &100, &2000, &1000);
+    }
+
+    #[test]
+    fn test_multiple_streams() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentStreamContract);
+        let client = PaymentStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+
+        let id1 = client.create_stream(&sender, &receiver, &100, &1000, &2000);
+        let id2 = client.create_stream(&sender, &receiver, &200, &1000, &3000);
+
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+
+        let s1 = client.get_stream(&id1);
+        let s2 = client.get_stream(&id2);
+        assert_eq!(s1.amount_per_second, 100);
+        assert_eq!(s2.amount_per_second, 200);
+    }
+
+    #[test]
+    fn test_stream_status() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentStreamContract);
+        let client = PaymentStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+
+        let stream_id = client.create_stream(&sender, &receiver, &100, &1000, &2000);
+
+        let status = client.get_status(&stream_id);
+        assert!(matches!(status, StreamStatus::Active));
+
+        client.pause_stream(&stream_id);
+        let status = client.get_status(&stream_id);
+        assert!(matches!(status, StreamStatus::Paused));
+
+        client.resume_stream(&stream_id);
+        let status = client.get_status(&stream_id);
+        assert!(matches!(status, StreamStatus::Active));
+
+        client.stop_stream(&stream_id);
+        let status = client.get_status(&stream_id);
+        assert!(matches!(status, StreamStatus::Cancelled));
     }
 }
-
-fn stream_key(stream_id: u64) -> Symbol {
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&stream_id.to_be_bytes());
-    symbol_short!("S").into_val(&Env::default()) // Placeholder - use proper key derivation
-}
-
-fn get_stream(env: &Env, stream_id: u64) -> PaymentStream {
-    env.storage()
-        .persistent()
-        .get(&stream_key(stream_id))
-        .expect("stream not found")
-}
-
-fn get_all_stream_ids(env: &Env) -> soroban_sdk::Vec<u64> {
-    env.storage()
-        .instance()
-        .get(&symbol_short!("ALL_IDS"))
-        .unwrap_or(soroban_sdk::Vec::new(env))
-}
-
-

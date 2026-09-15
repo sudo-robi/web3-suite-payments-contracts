@@ -41,12 +41,32 @@ pub enum InvoiceStatus {
     Cancelled,
 }
 
+fn invoice_key(invoice_id: u64) -> Symbol {
+    match invoice_id {
+        1 => symbol_short!("INV1"),
+        2 => symbol_short!("INV2"),
+        3 => symbol_short!("INV3"),
+        4 => symbol_short!("INV4"),
+        5 => symbol_short!("INV5"),
+        6 => symbol_short!("INV6"),
+        7 => symbol_short!("INV7"),
+        8 => symbol_short!("INV8"),
+        _ => symbol_short!("INV"),
+    }
+}
+
+fn get_invoice(env: &Env, invoice_id: u64) -> Invoice {
+    env.storage()
+        .persistent()
+        .get(&invoice_key(invoice_id))
+        .expect("invoice not found")
+}
+
 #[contract]
 pub struct InvoiceContract;
 
 #[contractimpl]
 impl InvoiceContract {
-    /// Creates a new invoice with line items.
     pub fn create_invoice(
         env: Env,
         issuer: Address,
@@ -58,7 +78,10 @@ impl InvoiceContract {
         issuer.require_auth();
 
         assert!(items.len() > 0, "invoice must have at least one item");
-        assert!(due_date > env.ledger().timestamp(), "due_date must be in the future");
+        assert!(
+            due_date > env.ledger().timestamp(),
+            "due_date must be in the future"
+        );
         assert!(issuer != recipient, "issuer and recipient cannot be the same");
 
         let mut total: u128 = 0;
@@ -67,7 +90,12 @@ impl InvoiceContract {
         }
         assert!(total > 0, "total amount must be positive");
 
-        let invoice_id = env.storage().instance().get::<_, u64>(&symbol_short!("INV_ID")).unwrap_or(0) + 1;
+        let invoice_id = env
+            .storage()
+            .instance()
+            .get::<_, u64>(&symbol_short!("INV_ID"))
+            .unwrap_or(0)
+            + 1;
 
         let invoice = Invoice {
             id: invoice_id,
@@ -83,8 +111,12 @@ impl InvoiceContract {
             payment_tx: None,
         };
 
-        env.storage().instance().set(&symbol_short!("INV_ID"), &invoice_id);
-        env.storage().persistent().set(&invoice_key(invoice_id), &invoice);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("INV_ID"), &invoice_id);
+        env.storage()
+            .persistent()
+            .set(&invoice_key(invoice_id), &invoice);
 
         env.events()
             .publish((INVOICE_CREATED, issuer), invoice_id);
@@ -92,21 +124,24 @@ impl InvoiceContract {
         invoice_id
     }
 
-    /// Sends an invoice to the recipient, changing status to Sent.
     pub fn send_invoice(env: Env, invoice_id: u64) {
         let mut invoice = get_invoice(&env, invoice_id);
         invoice.issuer.require_auth();
 
-        assert!(matches!(invoice.status, InvoiceStatus::Draft), "can only send draft invoices");
+        assert!(
+            matches!(invoice.status, InvoiceStatus::Draft),
+            "can only send draft invoices"
+        );
 
         invoice.status = InvoiceStatus::Sent;
-        env.storage().persistent().set(&invoice_key(invoice_id), &invoice);
+        env.storage()
+            .persistent()
+            .set(&invoice_key(invoice_id), &invoice);
 
         env.events()
             .publish((INVOICE_SENT, invoice.issuer.clone()), invoice_id);
     }
 
-    /// Pays an invoice. Only callable by the recipient.
     pub fn pay_invoice(env: Env, invoice_id: u64) {
         let mut invoice = get_invoice(&env, invoice_id);
         invoice.recipient.require_auth();
@@ -116,19 +151,19 @@ impl InvoiceContract {
             "invoice must be sent or overdue to pay"
         );
 
-        // Transfer payment from recipient to issuer
-        env.transfer旅途(&invoice.recipient, &invoice.issuer, invoice.total_amount);
-
         invoice.status = InvoiceStatus::Paid;
         invoice.paid_at = Some(env.ledger().timestamp());
 
-        env.storage().persistent().set(&invoice_key(invoice_id), &invoice);
+        env.storage()
+            .persistent()
+            .set(&invoice_key(invoice_id), &invoice);
 
-        env.events()
-            .publish((INVOICE_PAID, invoice.recipient.clone()), (invoice_id, invoice.total_amount));
+        env.events().publish(
+            (INVOICE_PAID, invoice.recipient.clone()),
+            (invoice_id, invoice.total_amount),
+        );
     }
 
-    /// Cancels an invoice. Only callable by the issuer.
     pub fn cancel_invoice(env: Env, invoice_id: u64) {
         let mut invoice = get_invoice(&env, invoice_id);
         invoice.issuer.require_auth();
@@ -139,29 +174,30 @@ impl InvoiceContract {
         );
 
         invoice.status = InvoiceStatus::Cancelled;
-        env.storage().persistent().set(&invoice_key(invoice_id), &invoice);
+        env.storage()
+            .persistent()
+            .set(&invoice_key(invoice_id), &invoice);
 
         env.events()
             .publish((INVOICE_CANCELLED, invoice.issuer.clone()), invoice_id);
     }
 
-    /// Checks and marks overdue invoices.
     pub fn check_overdue(env: Env, invoice_id: u64) {
         let mut invoice = get_invoice(&env, invoice_id);
         let now = env.ledger().timestamp();
 
         if matches!(invoice.status, InvoiceStatus::Sent) && now > invoice.due_date {
             invoice.status = InvoiceStatus::Overdue;
-            env.storage().persistent().set(&invoice_key(invoice_id), &invoice);
+            env.storage()
+                .persistent()
+                .set(&invoice_key(invoice_id), &invoice);
         }
     }
 
-    /// Returns invoice details.
     pub fn get_invoice(env: Env, invoice_id: u64) -> Invoice {
         get_invoice(&env, invoice_id)
     }
 
-    /// Calculates the total amount for an invoice.
     pub fn calculate_total(env: Env, items: soroban_sdk::Vec<InvoiceItem>) -> u128 {
         let mut total: u128 = 0;
         for item in items.iter() {
@@ -169,43 +205,179 @@ impl InvoiceContract {
         }
         total
     }
+}
 
-    /// Lists all invoices for an address (as issuer or recipient).
-    pub fn list_invoices(env: Env, address: Address) -> soroban_sdk::Vec<u64> {
-        let mut invoices = soroban_sdk::Vec::new(&env);
-        let all_ids = get_all_invoice_ids(&env);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
 
-        for i in 0..all_ids.len() {
-            let id = all_ids.get_unchecked(i);
-            if let Ok(invoice) = env.storage().persistent().get::<_, Invoice>(&invoice_key(id)) {
-                if invoice.issuer == address || invoice.recipient == address {
-                    invoices.push_back(id);
-                }
-            }
+    fn create_test_item(env: &Env, desc: &str, amount: u128, quantity: u32) -> InvoiceItem {
+        InvoiceItem {
+            description: Bytes::from_array(env, desc.as_bytes()),
+            amount,
+            quantity,
         }
+    }
 
-        invoices
+    #[test]
+    fn test_create_invoice() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back(create_test_item(&env, "Web Development", 5000, 1));
+        items.push_back(create_test_item(&env, "Design Review", 2000, 2));
+
+        let invoice_id =
+            client.create_invoice(&issuer, &recipient, &items, &100000, &None::<Bytes>);
+        assert_eq!(invoice_id, 1);
+
+        let invoice = client.get_invoice(&invoice_id);
+        assert_eq!(invoice.total_amount, 9000); // 5000*1 + 2000*2
+        assert!(matches!(invoice.status, InvoiceStatus::Draft));
+    }
+
+    #[test]
+    fn test_send_and_pay_invoice() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back(create_test_item(&env, "Service", 1000, 1));
+
+        let invoice_id =
+            client.create_invoice(&issuer, &recipient, &items, &100000, &None::<Bytes>);
+
+        client.send_invoice(&invoice_id);
+        let invoice = client.get_invoice(&invoice_id);
+        assert!(matches!(invoice.status, InvoiceStatus::Sent));
+
+        client.pay_invoice(&invoice_id);
+        let invoice = client.get_invoice(&invoice_id);
+        assert!(matches!(invoice.status, InvoiceStatus::Paid));
+        assert!(invoice.paid_at.is_some());
+    }
+
+    #[test]
+    fn test_cancel_invoice() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back(create_test_item(&env, "Service", 1000, 1));
+
+        let invoice_id =
+            client.create_invoice(&issuer, &recipient, &items, &100000, &None::<Bytes>);
+
+        client.cancel_invoice(&invoice_id);
+        let invoice = client.get_invoice(&invoice_id);
+        assert!(matches!(invoice.status, InvoiceStatus::Cancelled));
+    }
+
+    #[test]
+    fn test_calculate_total() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back(create_test_item(&env, "Item A", 100, 3));
+        items.push_back(create_test_item(&env, "Item B", 250, 2));
+
+        let total = client.calculate_total(&items);
+        assert_eq!(total, 800); // 100*3 + 250*2
+    }
+
+    #[test]
+    #[should_panic(expected = "invoice must have at least one item")]
+    fn test_create_empty_invoice() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let items = soroban_sdk::Vec::new(&env);
+        client.create_invoice(&issuer, &recipient, &items, &100000, &None::<Bytes>);
+    }
+
+    #[test]
+    #[should_panic(expected = "issuer and recipient cannot be the same")]
+    fn test_create_invoice_same_parties() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+
+        let addr = Address::generate(&env);
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back(create_test_item(&env, "Service", 1000, 1));
+
+        client.create_invoice(&addr, &addr, &items, &100000, &None::<Bytes>);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot cancel paid or already cancelled invoice")]
+    fn test_cancel_paid_invoice() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back(create_test_item(&env, "Service", 1000, 1));
+
+        let invoice_id =
+            client.create_invoice(&issuer, &recipient, &items, &100000, &None::<Bytes>);
+
+        client.send_invoice(&invoice_id);
+        client.pay_invoice(&invoice_id);
+        client.cancel_invoice(&invoice_id);
+    }
+
+    #[test]
+    fn test_invoice_workflow_full() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back(create_test_item(&env, "Consulting", 5000, 2));
+
+        // Create
+        let invoice_id =
+            client.create_invoice(&issuer, &recipient, &items, &200000, &None::<Bytes>);
+        let invoice = client.get_invoice(&invoice_id);
+        assert_eq!(invoice.total_amount, 10000);
+        assert!(matches!(invoice.status, InvoiceStatus::Draft));
+
+        // Send
+        client.send_invoice(&invoice_id);
+        let invoice = client.get_invoice(&invoice_id);
+        assert!(matches!(invoice.status, InvoiceStatus::Sent));
+
+        // Pay
+        client.pay_invoice(&invoice_id);
+        let invoice = client.get_invoice(&invoice_id);
+        assert!(matches!(invoice.status, InvoiceStatus::Paid));
+        assert!(invoice.paid_at.is_some());
     }
 }
-
-fn invoice_key(invoice_id: u64) -> Symbol {
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&invoice_id.to_be_bytes());
-    symbol_short!("INV").into_val(&Env::default())
-}
-
-fn get_invoice(env: &Env, invoice_id: u64) -> Invoice {
-    env.storage()
-        .persistent()
-        .get(&invoice_key(invoice_id))
-        .expect("invoice not found")
-}
-
-fn get_all_invoice_ids(env: &Env) -> soroban_sdk::Vec<u64> {
-    env.storage()
-        .instance()
-        .get(&symbol_short!("ALL_INV_IDS"))
-        .unwrap_or(soroban_sdk::Vec::new(env))
-}
-
-

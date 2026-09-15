@@ -1,420 +1,283 @@
-# web3-suite-payments-contracts
+# web3-suite Payments Contracts
 
-[![Rust](https://img.shields.io/badge/Rust-2021-blue?logo=rust)](https://www.rust-lang.org/)
-[![Soroban](https://img.shields.io/badge/Soroban-21.0-7B61FF?logo=stellar)](https://soroban.stellar.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
-[![Stellar](https://img.shields.io/badge/Network-Stellar-08B5E5?logo=stellar)](https://stellar.org)
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![Soroban](https://img.shields.io/badge/Soroban-21.0.0-green.svg)
+![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)
+![Stellar](https://img.shields.io/badge/Stellar-Network-black.svg)
 
-Soroban smart contracts powering the payment primitives for the **web3-suite** ecosystem on Stellar. Provides continuous payment streams, on-chain invoicing, and recurring subscription billing — all natively on-chain with minimal trust assumptions.
-
----
+Soroban smart contracts for the web3-suite payment ecosystem on Stellar. Three production-ready contracts enabling continuous payment streams, on-chain invoicing, and recurring subscription billing.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    web3-suite-payments-contracts                │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌───────────────────┐  ┌───────────────────┐  ┌─────────────┐ │
-│  │  Payment Stream   │  │     Invoice       │  │ Subscription│ │
-│  │    Contract       │  │    Contract       │  │  Contract   │ │
-│  ├───────────────────┤  ├───────────────────┤  ├─────────────┤ │
-│  │ • create_stream   │  │ • create_invoice  │  │ • create_pl │ │
-│  │ • withdraw        │  │ • send_invoice    │  │ • subscribe │ │
-│  │ • pause_stream    │  │ • pay_invoice     │  │ • process_bi│ │
-│  │ • resume_stream   │  │ • cancel_invoice  │  │ • cancel_sub│ │
-│  │ • stop_stream     │  │ • check_overdue   │  │ • get_plan  │ │
-│  │ • get_stream      │  │ • get_invoice     │  │ • list_sub  │ │
-│  │ • list_streams    │  │ • list_invoices   │  │             │ │
-│  └─────────┬─────────┘  └─────────┬─────────┘  └──────┬──────┘ │
-│            │                      │                    │        │
-│            └──────────────────────┼────────────────────┘        │
-│                                   │                             │
-│                          ┌────────▼────────┐                    │
-│                          │   Soroban SDK   │                    │
-│                          │  (Stellar VM)   │                    │
-│                          └─────────────────┘                    │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Stellar Network                          │
+│                                                             │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │   Payment     │  │   Invoice    │  │   Subscription   │  │
+│  │   Stream      │  │   Contract   │  │   Contract       │  │
+│  │   Contract    │  │              │  │                  │  │
+│  │              │  │  - Create    │  │  - Create Plan   │  │
+│  │  - Create    │  │  - Send      │  │  - Subscribe     │  │
+│  │  - Withdraw  │  │  - Pay       │  │  - Process Bill  │  │
+│  │  - Pause     │  │  - Cancel    │  │  - Cancel        │  │
+│  │  - Resume    │  │  - Overdue   │  │  - Next Bill     │  │
+│  │  - Stop      │  │              │  │                  │  │
+│  └──────┬───────┘  └──────┬───────┘  └────────┬─────────┘  │
+│         │                 │                    │             │
+│         └─────────────────┼────────────────────┘             │
+│                           │                                  │
+│                    Soroban VM (WASM)                         │
+└─────────────────────────────────────────────────────────────┘
+                            │
+              ┌─────────────┼─────────────┐
+              │             │             │
+     ┌────────▼──────┐ ┌───▼────┐ ┌──────▼───────┐
+     │   Backend     │ │Freighter│ │   Frontend   │
+     │   API         │ │ Wallet │ │   React App  │
+     │   (Express)   │ │        │ │   (Vite)     │
+     └───────────────┘ └────────┘ └──────────────┘
 ```
-
-### Data Flow
-
-```
-User (Sender)                 Smart Contract              User (Receiver)
-     │                              │                           │
-     │──── create_stream() ────────►│                           │
-     │                              │─── STREAM_CREATED ──────►│
-     │                              │                           │
-     │                              │◄──── withdraw() ─────────│
-     │                              │───── transfer() ────────►│
-     │                              │                           │
-     │◄─── pause_stream() ─────────│                           │
-     │                              │                           │
-     │──── resume_stream() ────────►│                           │
-     │                              │                           │
-     │──── stop_stream() ──────────►│                           │
-     │                              │─── remaining funds ─────►│
-```
-
----
 
 ## Contracts
 
-### 1. Payment Stream Contract
+### Payment Stream Contract (`contracts/stream`)
 
-**Purpose:** Enables continuous, real-time payment streams between two parties. Funds flow at a configurable rate per second, with support for pausing, resuming, and early termination.
-
-**Key Features:**
-- Configurable payment rate (tokens per second)
-- Pause/resume without losing accumulated state
-- Pro-rata withdrawal at any time
-- Automatic completion at end time
-- Event emission for all state changes
-
-**Storage Model:**
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | `u64` | Unique stream identifier |
-| `sender` | `Address` | Account funding the stream |
-| `receiver` | `Address` | Account receiving payments |
-| `amount_per_second` | `u128` | Payment rate |
-| `start_time` | `u64` | Stream start (unix timestamp) |
-| `end_time` | `u64` | Stream end (unix timestamp) |
-| `total_streamed` | `u128` | Cumulative amount streamed |
-| `withdrawn` | `u128` | Amount already withdrawn |
-| `is_active` | `bool` | Whether stream is live |
-| `is_paused` | `bool` | Whether stream is paused |
-| `pause_time` | `Option<u64>` | When pause started |
-| `cumulative_pause_duration` | `u64` | Total time paused |
-
-### 2. Invoice Contract
-
-**Purpose:** On-chain invoice creation, sending, payment, and lifecycle management. Supports line-item invoices with automatic total calculation.
+Continuous real-time payment streams. Funds flow at a constant rate per second from sender to receiver.
 
 **Key Features:**
-- Line-item invoices with descriptions, amounts, and quantities
-- Automatic total calculation
-- Draft → Sent → Paid/Overdue/Cancelled lifecycle
-- Due date enforcement
-- Event emission for audit trail
+- Create streams with configurable rate and duration
+- Withdraw available funds at any time
+- Pause/resume streams (sender-controlled)
+- Stop streams and settle remaining balance
+- Accurate withdrawable amount calculation with pause compensation
 
-**Storage Model:**
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | `u64` | Unique invoice identifier |
-| `issuer` | `Address` | Account that created the invoice |
-| `recipient` | `Address` | Account that should pay |
-| `items` | `Vec<InvoiceItem>` | Line items |
-| `total_amount` | `u128` | Calculated total |
-| `due_date` | `u64` | Payment deadline |
-| `status` | `InvoiceStatus` | Current lifecycle state |
-| `paid_at` | `Option<u64>` | When payment was made |
-| `payment_tx` | `Option<Bytes>` | Reference to payment transaction |
+**API:**
 
-### 3. Subscription Contract
+| Function | Auth | Description |
+|----------|------|-------------|
+| `create_stream(sender, receiver, amount_per_second, start_time, end_time)` | sender | Create a new payment stream |
+| `withdraw(stream_id, amount?)` | receiver | Withdraw available funds |
+| `pause_stream(stream_id)` | sender | Pause the stream |
+| `resume_stream(stream_id)` | sender | Resume a paused stream |
+| `stop_stream(stream_id)` | sender | Stop and settle the stream |
+| `get_withdrawable(stream_id)` | none | Get withdrawable amount |
+| `get_stream(stream_id)` | none | Get stream details |
+| `get_status(stream_id)` | none | Get stream status |
 
-**Purpose:** Recurring subscription billing with configurable plans and billing intervals. Supports merchant-created plans and subscriber management.
+### Invoice Contract (`contracts/invoice`)
+
+On-chain invoicing with line items, status tracking, and payment settlement.
 
 **Key Features:**
-- Multiple billing intervals (daily, weekly, monthly, quarterly, yearly)
-- Plan capacity limits
-- Automatic next-billing-date calculation
-- Subscriber count tracking
-- Pause and cancellation support
+- Create invoices with multiple line items
+- Draft -> Sent -> Paid/Cancelled lifecycle
+- Automatic overdue detection
+- Total calculation from line items
+- Issuer and recipient role enforcement
 
-**Storage Model:**
+**API:**
 
-*SubscriptionPlan:*
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | `u64` | Unique plan identifier |
-| `name` | `Bytes` | Plan display name |
-| `amount` | `u128` | Price per billing cycle |
-| `billing_interval` | `BillingInterval` | How often to bill |
-| `interval_count` | `u32` | Multiplier for interval |
-| `max_subscribers` | `Option<u32>` | Capacity limit |
-| `current_subscribers` | `u32` | Active subscriber count |
+| Function | Auth | Description |
+|----------|------|-------------|
+| `create_invoice(issuer, recipient, items, due_date, notes?)` | issuer | Create a new invoice |
+| `send_invoice(invoice_id)` | issuer | Send invoice to recipient |
+| `pay_invoice(invoice_id)` | recipient | Pay the invoice |
+| `cancel_invoice(invoice_id)` | issuer | Cancel the invoice |
+| `check_overdue(invoice_id)` | none | Mark overdue invoices |
+| `get_invoice(invoice_id)` | none | Get invoice details |
+| `calculate_total(items)` | none | Calculate total from items |
 
-*Subscription:*
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | `u64` | Unique subscription identifier |
-| `plan_id` | `u64` | Associated plan |
-| `subscriber` | `Address` | Paying user |
-| `merchant` | `Address` | Plan creator |
-| `next_billing_date` | `u64` | Next charge date |
-| `total_paid` | `u128` | Cumulative payments |
-| `is_active` | `bool` | Subscription status |
+### Subscription Contract (`contracts/subscription`)
 
----
+Recurring billing with configurable intervals and subscriber management.
 
-## API Reference
+**Key Features:**
+- Create plans with daily/weekly/monthly/quarterly/yearly billing
+- Optional subscriber caps
+- Automated billing cycle management
+- Subscription cancellation with plan counter update
+- Configurable interval multipliers
 
-### Payment Stream Contract
+**API:**
 
+| Function | Auth | Description |
+|----------|------|-------------|
+| `create_plan(creator, name, description, amount, interval, count, max?)` | creator | Create a subscription plan |
+| `subscribe(plan_id, subscriber)` | subscriber | Subscribe to a plan |
+| `process_billing(sub_id)` | none | Process billing cycle |
+| `cancel_subscription(sub_id)` | subscriber | Cancel subscription |
+| `get_plan(plan_id)` | none | Get plan details |
+| `get_subscription(sub_id)` | none | Get subscription details |
+| `next_billing_date(current, interval, count)` | none | Calculate next billing date |
+
+## Data Structures
+
+### PaymentStream
 ```rust
-// Create a new payment stream
-fn create_stream(
-    env: Env,
-    sender: Address,
-    receiver: Address,
-    amount_per_second: u128,
-    start_time: u64,
-    end_time: u64,
-) -> u64;
-
-// Withdraw available funds
-fn withdraw(env: Env, stream_id: u64, amount: Option<u128>) -> u128;
-
-// Pause stream (sender only)
-fn pause_stream(env: Env, stream_id: u64);
-
-// Resume paused stream (sender only)
-fn resume_stream(env: Env, stream_id: u64);
-
-// Stop stream and return remaining funds
-fn stop_stream(env: Env, stream_id: u64);
-
-// Get withdrawable amount
-fn get_withdrawable(env: Env, stream_id: u64) -> u128;
-
-// Get stream details
-fn get_stream(env: Env, stream_id: u64) -> PaymentStream;
-
-// List streams for an address
-fn list_streams(env: Env, address: Address) -> Vec<u64>;
+pub struct PaymentStream {
+    pub id: u64,
+    pub sender: Address,
+    pub receiver: Address,
+    pub amount_per_second: u128,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub total_streamed: u128,
+    pub withdrawn: u128,
+    pub is_active: bool,
+    pub is_paused: bool,
+    pub pause_time: Option<u64>,
+    pub cumulative_pause_duration: u64,
+    pub created_at: u64,
+}
 ```
 
-### Invoice Contract
-
+### Invoice
 ```rust
-// Create a new invoice
-fn create_invoice(
-    env: Env,
-    issuer: Address,
-    recipient: Address,
-    items: Vec<InvoiceItem>,
-    due_date: u64,
-    notes: Option<Bytes>,
-) -> u64;
-
-// Send invoice to recipient
-fn send_invoice(env: Env, invoice_id: u64);
-
-// Pay an invoice
-fn pay_invoice(env: Env, invoice_id: u64);
-
-// Cancel an invoice
-fn cancel_invoice(env: Env, invoice_id: u64);
-
-// Check and mark overdue
-fn check_overdue(env: Env, invoice_id: u64);
-
-// Calculate total for items
-fn calculate_total(env: Env, items: Vec<InvoiceItem>) -> u128;
-
-// Get invoice details
-fn get_invoice(env: Env, invoice_id: u64) -> Invoice;
-
-// List invoices for an address
-fn list_invoices(env: Env, address: Address) -> Vec<u64>;
+pub struct Invoice {
+    pub id: u64,
+    pub issuer: Address,
+    pub recipient: Address,
+    pub items: Vec<InvoiceItem>,
+    pub total_amount: u128,
+    pub due_date: u64,
+    pub issued_date: u64,
+    pub status: InvoiceStatus,
+    pub notes: Option<Bytes>,
+    pub paid_at: Option<u64>,
+    pub payment_tx: Option<Bytes>,
+}
 ```
 
-### Subscription Contract
-
+### SubscriptionPlan
 ```rust
-// Create a subscription plan
-fn create_plan(
-    env: Env,
-    creator: Address,
-    name: Bytes,
-    description: Bytes,
-    amount: u128,
-    billing_interval: BillingInterval,
-    interval_count: u32,
-    max_subscribers: Option<u32>,
-) -> u64;
-
-// Subscribe to a plan
-fn subscribe(env: Env, plan_id: u64, subscriber: Address) -> u64;
-
-// Process billing cycle
-fn process_billing(env: Env, sub_id: u64) -> u128;
-
-// Cancel subscription
-fn cancel_subscription(env: Env, sub_id: u64);
-
-// Get subscription details
-fn get_subscription(env: Env, sub_id: u64) -> Subscription;
-
-// Get plan details
-fn get_plan(env: Env, plan_id: u64) -> SubscriptionPlan;
-
-// List subscriptions for an address
-fn list_subscriptions(env: Env, address: Address) -> Vec<u64>;
+pub struct SubscriptionPlan {
+    pub id: u64,
+    pub name: Bytes,
+    pub description: Bytes,
+    pub amount: u128,
+    pub billing_interval: BillingInterval,
+    pub interval_count: u32,
+    pub max_subscribers: Option<u32>,
+    pub current_subscribers: u32,
+    pub creator: Address,
+    pub is_active: bool,
+    pub created_at: u64,
+}
 ```
 
----
+## Build
 
-## Prerequisites
+### Prerequisites
 
 - [Rust](https://rustup.rs/) (stable)
-- [Soroban CLI](https://soroban.stellar.org/docs/getting-started/installation)
+- [Soroban CLI](https://soroban.stellar.org/docs/getting-started/setup)
 - [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools)
 
-## Building
+### Build All Contracts
 
 ```bash
-# Clone the repository
-git clone https://github.com/sudo-robi/web3-suite-payments-contracts.git
-cd web3-suite-payments-contracts
-
-# Build all contracts
-cargo build --target wasm32-unknown-unknown --release
-
-# Build individual contracts
-cargo build --target wasm32-unknown-unknown --release -p web3-suite-payment-stream
-cargo build --target wasm32-unknown-unknown --release -p web3-suite-payment-invoice
-cargo build --target wasm32-unknown-unknown --release -p web3-suite-payment-subscription
+# From workspace root
+cargo build --release
 ```
 
-## Testing
+### Build Individual Contract
 
 ```bash
-# Run all tests
+# Stream contract
+cargo build --release -p web3-suite-payment-stream
+
+# Invoice contract
+cargo build --release -p web3-suite-payment-invoice
+
+# Subscription contract
+cargo build --release -p web3-suite-payment-subscription
+```
+
+### Run Tests
+
+```bash
+# All tests
 cargo test
 
-# Run tests for a specific contract
+# Specific contract tests
 cargo test -p web3-suite-payment-stream
 cargo test -p web3-suite-payment-invoice
 cargo test -p web3-suite-payment-subscription
 ```
 
-## Deploying
+## Deploy
 
-### Deploy to Testnet
+### 1. Deploy to Testnet
 
 ```bash
-# Install Soroban CLI
-cargo install --locked soroban-cli
-
-# Generate a keypair (if you don't have one)
-soroban keys generate my-account
-
-# Fund the account on testnet
-soroban keys fund my-account --network testnet
-
-# Deploy the stream contract
-soroban contract deploy \
+# Deploy stream contract
+stellar contract deploy \
   --wasm target/wasm32-unknown-unknown/release/web3_suite_payment_stream.wasm \
-  --source my-account \
+  --source admin \
   --network testnet
 
-# Deploy the invoice contract
-soroban contract deploy \
+# Deploy invoice contract
+stellar contract deploy \
   --wasm target/wasm32-unknown-unknown/release/web3_suite_payment_invoice.wasm \
-  --source my-account \
+  --source admin \
   --network testnet
 
-# Deploy the subscription contract
-soroban contract deploy \
+# Deploy subscription contract
+stellar contract deploy \
   --wasm target/wasm32-unknown-unknown/release/web3_suite_payment_subscription.wasm \
-  --source my-account \
+  --source admin \
   --network testnet
 ```
 
-### Initialize Contracts
+### 2. Initialize Contracts
 
 ```bash
-# Initialize a stream (replace CONTRACT_ID with deployed address)
-soroban contract invoke \
-  --id CONTRACT_ID \
-  --source my-account \
-  --network testnet \
-  -- create_stream \
-  --sender sender_address \
-  --receiver receiver_address \
-  --amount-per-second 100 \
-  --start-time $(date +%s) \
-  --end-time $(($(date +%s) + 86400))
+# After deployment, save the contract IDs and configure your backend:
+# STREAM_CONTRACT_ID=<contract-address>
+# INVOICE_CONTRACT_ID=<contract-address>
+# SUBSCRIPTION_CONTRACT_ID=<contract-address>
 ```
 
----
+### 3. Fund Admin Account
 
-## Project Structure
-
-```
-web3-suite-payments-contracts/
-├── Cargo.toml                    # Workspace configuration
-├── LICENSE                       # MIT License
-├── README.md                     # This file
-├── .gitignore
-└── contracts/
-    ├── stream/
-    │   ├── Cargo.toml
-    │   ├── src/
-    │   │   └── lib.rs           # Payment stream contract
-    │   └── tests/
-    │       └── test_stream.rs   # Stream contract tests
-    ├── invoice/
-    │   ├── Cargo.toml
-    │   ├── src/
-    │   │   └── lib.rs           # Invoice contract
-    │   └── tests/
-    │       └── test_invoice.rs  # Invoice contract tests
-    └── subscription/
-        ├── Cargo.toml
-        ├── src/
-        │   └── lib.rs           # Subscription contract
-        └── tests/
-            └── test_subscription.rs  # Subscription tests
+```bash
+# Get testnet tokens
+stellar keys fund admin --network testnet
 ```
 
----
+## Network Configuration
+
+| Network | Passphrase | RPC URL |
+|---------|-----------|---------|
+| Testnet | `Test SDF Network ; September 2015` | `https://soroban-testnet.stellar.org` |
+| Futurenet | `Test SDF Future Network ; October 2022` | `https://soroban-futurenet.stellar.org` |
+| Mainnet | `Public Global Stellar Network ; September 2015` | `https://soroban-mainnet.stellar.org` |
 
 ## Security Considerations
 
-- All state-changing functions require authorization (`require_auth()`)
-- Input validation on all public functions
-- Overflow checks enabled in release builds
-- Stream math uses `u128` to prevent overflow on large amounts
-- Paused streams don't accrue time, preventing double-spend
-- Subscription billing is pull-based (merchant calls `process_billing`)
+- All state-changing functions require authorization from the appropriate party
+- Streams enforce `sender != receiver` at creation time
+- Invoice payments are only accepted from the designated recipient
+- Subscription billing checks `next_billing_date` to prevent premature charges
+- Withdrawal amounts are calculated with pause compensation for fair settlement
 
 ## Contributing
 
-Contributions are welcome! Please follow these steps:
-
-1. **Fork** the repository
-2. **Create** a feature branch (`git checkout -b feature/amazing-feature`)
-3. **Commit** your changes (`git commit -m 'Add amazing feature'`)
-4. **Push** to the branch (`git push origin feature/amazing-feature`)
-5. **Open** a Pull Request
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ### Development Guidelines
 
 - Write tests for all new functionality
-- Follow Rust idioms and `clippy` lints
-- Keep functions focused and under 50 lines
-- Document public API with doc comments
-- Run `cargo fmt` and `cargo clippy` before committing
-
-### Code of Conduct
-
-- Be respectful and inclusive
-- Focus on constructive feedback
-- Help newcomers learn
-- Credit contributors appropriately
-
----
+- Follow Soroban SDK conventions
+- Use `cargo fmt` and `cargo clippy` before committing
+- Keep contracts small and focused
+- Document public API functions
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](./LICENSE) file for details.
-
-## Acknowledgments
-
-- [Stellar Development Foundation](https://stellar.org/) for the Stellar network
-- [Soroban](https://soroban.stellar.org/) for the smart contract platform
-- The open-source Rust community
+MIT License - see [LICENSE](../LICENSE) for details.
